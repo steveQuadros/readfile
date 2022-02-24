@@ -19,7 +19,6 @@ func TestSerialParse(t *testing.T) {
 	term := "create"
 	res, err := SerialParse("testdata", term, 1024)
 	require.NoError(t, err, "something went wrong")
-
 	verifyParseResults(t, res, term)
 }
 
@@ -28,8 +27,10 @@ func TestParallelParse(t *testing.T) {
 	term := "create"
 	res, err := ParallelParse("testdata", term, 1024, 10)
 	require.NoError(t, err, "something went wrong")
-
 	verifyParseResults(t, res, term)
+
+	_, err = ParallelParse("doesntexist", term, 1024, 10)
+	require.Error(t, err)
 }
 
 func benchmarkSerialParse(n int, b *testing.B) {
@@ -44,17 +45,17 @@ func BenchmarkSerialParse10(b *testing.B)   { benchmarkSerialParse(10, b) }
 func BenchmarkSerialParse100(b *testing.B)  { benchmarkSerialParse(100, b) }
 func BenchmarkSerialParse1000(b *testing.B) { benchmarkSerialParse(1000, b) }
 
-func benchmarkParallelParse(n int, b *testing.B) {
+func benchmarkParallelParse(n int, w int, b *testing.B) {
 	CreateTestFiles(b, n)
 	for i := 0; i < b.N; i++ {
-		_, err := ParallelParse("testdata", "create", 1024, 10)
+		_, err := ParallelParse("testdata", "create", 1024, w)
 		require.NoError(b, err)
 	}
 }
 
-func BenchmarkParallelParse10(b *testing.B)   { benchmarkParallelParse(10, b) }
-func BenchmarkParallelParse100(b *testing.B)  { benchmarkParallelParse(100, b) }
-func BenchmarkParallelParse1000(b *testing.B) { benchmarkParallelParse(1000, b) }
+func BenchmarkParallelParse10(b *testing.B)   { benchmarkParallelParse(10, 100, b) }
+func BenchmarkParallelParse100(b *testing.B)  { benchmarkParallelParse(100, 100, b) }
+func BenchmarkParallelParse1000(b *testing.B) { benchmarkParallelParse(1000, 100, b) }
 
 func verifyParseResults(t *testing.T, res []ParseResult, term string) {
 	for _, r := range res {

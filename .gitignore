@@ -1,3 +1,5 @@
 .idea
 testdata/*
 !testdata/example.log
+*.out
+*.test
