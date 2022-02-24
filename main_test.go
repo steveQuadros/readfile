@@ -56,10 +56,10 @@ func BenchmarkParallelParse10(b *testing.B)   { benchmarkParallelParse(10, b) }
 func BenchmarkParallelParse100(b *testing.B)  { benchmarkParallelParse(100, b) }
 func BenchmarkParallelParse1000(b *testing.B) { benchmarkParallelParse(1000, b) }
 
-func verifyParseResults(t *testing.T, res ParseResult, term string) {
-	for filename, offsets := range res {
+func verifyParseResults(t *testing.T, res []ParseResult, term string) {
+	for _, r := range res {
 		func() {
-			file, err := os.Open(filename)
+			file, err := os.Open(r.path)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -69,7 +69,7 @@ func verifyParseResults(t *testing.T, res ParseResult, term string) {
 				}
 			}()
 
-			for _, offset := range offsets {
+			for _, offset := range r.offsets {
 				actual := make([]byte, len(term))
 				_, err = file.ReadAt(actual, offset)
 				require.Equal(t, []byte(term), actual)

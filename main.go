@@ -21,23 +21,31 @@ func main() {
 	}
 }
 
-type ParseResult map[string][]int64
+type ParseResult struct {
+	path    string
+	offsets []int64
+}
 
-func SerialParse(dir string, term string, bufSize int) (ParseResult, error) {
-	res := ParseResult{}
+func SerialParse(dir string, term string, bufSize int) ([]ParseResult, error) {
+	res := []ParseResult{}
 	err := filepath.WalkDir(dir, func(path string, dir os.DirEntry, err error) error {
 		if dir.IsDir() {
 			return nil
 		}
-		return processFile(path, term, bufSize, res)
+		pr, err := processFile(path, term, bufSize)
+		if err != nil {
+			return err
+		}
+		res = append(res, pr)
+		return nil
 	})
 	return res, err
 }
 
 // Parallel version walks a dir to get files to parse and pushes them to chan skipping dirs
 // workers pull from the filenames and do the parsing
-func ParallelParse(dir string, term string, bufSize int, workerCount int) (ParseResult, error) {
-	res := ParseResult{}
+func ParallelParse(dir string, term string, bufSize int, workerCount int) ([]ParseResult, error) {
+	res := []ParseResult{}
 	files := make(chan string)
 	go func() {
 		if err := collectFiles(dir, files); err != nil {
@@ -47,7 +55,7 @@ func ParallelParse(dir string, term string, bufSize int, workerCount int) (Parse
 	}()
 
 	errorChan := make(chan error)
-	defer close(errorChan)
+	resultsChan := make(chan ParseResult)
 	var processErr error
 
 WorkLoop:
@@ -55,21 +63,31 @@ WorkLoop:
 		select {
 		case f, ok := <-files:
 			if !ok {
+				fmt.Println("channel closed")
 				files = nil
+				close(errorChan)
+				close(resultsChan)
 				break WorkLoop
 			}
 			go func() {
-				if err := processFile(f, term, bufSize, res); err != nil {
+				parseResult, err := processFile(f, term, bufSize)
+				if err != nil {
 					errorChan <- err
 				}
+				resultsChan <- parseResult
 			}()
-
 		case err, ok := <-errorChan:
 			if !ok {
 				errorChan = nil
 				break WorkLoop
 			}
 			processErr = errors.Wrap(processErr, err.Error())
+		case result, ok := <-resultsChan:
+			if !ok {
+				resultsChan = nil
+				break WorkLoop
+			}
+			res = append(res, result)
 		}
 	}
 	return res, processErr
@@ -85,13 +103,12 @@ func collectFiles(dir string, out chan<- string) error {
 	})
 }
 
-func processFile(path string, term string, bufSize int) (string, []int64, error) {
-	var positions []int64
-
+func processFile(path string, term string, bufSize int) (ParseResult, error) {
+	parseResult := ParseResult{path: path}
 	var f *os.File
 	f, err := os.Open(path)
 	if err != nil {
-		return path, positions, err
+		return parseResult, err
 	}
 	defer func() {
 		err = f.Close()
@@ -117,10 +134,10 @@ func processFile(path string, term string, bufSize int) (string, []int64, error)
 			if err != nil {
 				break
 			}
-			positions = append(positions, int64(pos))
+			parseResult.offsets = append(parseResult.offsets, int64(offset+pos))
 		}
 		offset += n
 	}
 
-	return path, positions, err
+	return parseResult, err
 }
