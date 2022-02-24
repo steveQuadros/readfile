@@ -2,9 +2,8 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
 	"fmt"
-	"go.uber.org/zap"
+	"github.com/pkg/errors"
 	"io"
 	"log"
 	"os"
@@ -22,114 +21,106 @@ func main() {
 	}
 }
 
-type FileLocation struct {
-	pos int
-}
+type ParseResult map[string][]int64
 
-// @TODO - for each file create offset and count based on buffer using index from strings.Index()
-func SerialParse(dir string, term string, bufSize int) (map[string][]int64, error) {
-	out := make(map[string][]int64)
+func SerialParse(dir string, term string, bufSize int) (ParseResult, error) {
+	res := ParseResult{}
 	err := filepath.WalkDir(dir, func(path string, dir os.DirEntry, err error) error {
 		if dir.IsDir() {
 			return nil
 		}
-		b := make([]byte, bufSize)
-		var f *os.File
-		f, err = os.Open(path)
-		if err != nil {
-			return err
+		return processFile(path, term, bufSize, res)
+	})
+	return res, err
+}
+
+// Parallel version walks a dir to get files to parse and pushes them to chan skipping dirs
+// workers pull from the filenames and do the parsing
+func ParallelParse(dir string, term string, bufSize int, workerCount int) (ParseResult, error) {
+	res := ParseResult{}
+	files := make(chan string)
+	go func() {
+		if err := collectFiles(dir, files); err != nil {
+			log.Fatal(err)
 		}
-		defer func() {
-			err = f.Close()
-		}()
+		close(files)
+	}()
 
-		termBytes := []byte(term)
-		for {
-			_, err = f.Read(b)
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				return err
-			}
+	errorChan := make(chan error)
+	defer close(errorChan)
+	var processErr error
 
-			if bytes.Contains(b, termBytes) {
-				var inf os.FileInfo
-				inf, err = dir.Info()
-				if err != nil {
-					return err
-				}
-				out[path] = append(out[path], inf.Size())
+WorkLoop:
+	for {
+		select {
+		case f, ok := <-files:
+			if !ok {
+				files = nil
+				break WorkLoop
 			}
+			go func() {
+				if err := processFile(f, term, bufSize, res); err != nil {
+					errorChan <- err
+				}
+			}()
+
+		case err, ok := <-errorChan:
+			if !ok {
+				errorChan = nil
+				break WorkLoop
+			}
+			processErr = errors.Wrap(processErr, err.Error())
 		}
+	}
+	return res, processErr
+}
 
+func collectFiles(dir string, out chan<- string) error {
+	return filepath.WalkDir(dir, func(path string, dir os.DirEntry, err error) error {
+		if dir.IsDir() {
+			return nil
+		}
+		out <- path
 		return nil
 	})
-	return out, err
 }
 
-func readBinary() {
-	s := "Hello World!"
-	b := []byte{}
-	for i := 0; i < 100; i++ {
-		b = append(b, []byte(s)...)
-	}
-	buf := bytes.NewReader(b)
-	out := make([]byte, 10)
-	var err error
-	for {
-		err = binary.Read(buf, binary.LittleEndian, &out)
-		if err != nil {
-			fmt.Println("binary.Read failed:", err)
-		}
-		if err == io.EOF {
-			return
-		}
-		fmt.Print(string(out))
-	}
-}
+func processFile(path string, term string, bufSize int) (string, []int64, error) {
+	var positions []int64
 
-func writeBin() {
-	BufSize := 100
-	logger, err := zap.NewProduction()
+	var f *os.File
+	f, err := os.Open(path)
 	if err != nil {
-		log.Fatal(err)
-	}
-
-	file, err := os.Open("example.log")
-	if err != nil {
-		logger.Fatal(err.Error())
+		return path, positions, err
 	}
 	defer func() {
-		if err = file.Close(); err != nil {
-			logger.Fatal(err.Error())
-		}
+		err = f.Close()
 	}()
 
-	b := make([]byte, BufSize)
-	out, err := os.OpenFile("examplebin.log", os.O_RDWR|os.O_CREATE, 0755)
-	if err != nil {
-		log.Fatal(err.Error())
-	}
-	defer func() {
-		if err = out.Close(); err != nil {
-			logger.Fatal(err.Error())
-		}
-	}()
-
+	termBytes := []byte(term)
+	var offset int
+	b := make([]byte, bufSize)
 	for {
 		var n int
-		n, err = file.Read(b)
+		n, err = f.Read(b)
 		if err != nil {
 			if err == io.EOF {
-				return
+				// reset error for return - EOF is good
+				err = nil
+				break
 			}
-			logger.Fatal(err.Error())
+			break
 		}
-		fmt.Println(string(b[0:n]))
-		err = binary.Write(out, binary.LittleEndian, b)
-		if err != nil {
-			logger.Fatal(err.Error())
+
+		pos := bytes.Index(b, termBytes)
+		if pos != -1 {
+			if err != nil {
+				break
+			}
+			positions = append(positions, int64(pos))
 		}
+		offset += n
 	}
+
+	return path, positions, err
 }
