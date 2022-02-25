@@ -6,6 +6,7 @@ import (
 	"github.com/pkg/errors"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,65 +45,74 @@ func SerialParse(dir string, term string, bufSize int) ([]ParseResult, error) {
 }
 
 type FileProcessor struct {
-	parseErrors  chan<- error
-	parseResults chan<- ParseResult
+	parseErrors  chan error
+	parseResults chan ParseResult
 	term         string
 	bufSize      int
 	workerCount  int
-	files        []string
+	files        chan string
 	curFile      int
 }
 
-// Parallel version walks a dir to get files to parse and pushes them to chan skipping dirs
-// workers pull from the filenames and do the parsing
 func ParallelParse(dir string, term string, bufSize int, workerCount int) ([]ParseResult, error) {
 	var res []ParseResult
 
-	files := make(chan []string, 1)
+	files := make(chan string)
 	filesErr := make(chan error, 1)
-
+	totalFilesChan := make(chan int, 1)
 	go func() {
-		filepaths, err := collectFiles(dir)
+		n, err := sendFiles(dir, files)
 		if err != nil {
 			filesErr <- err
 		} else {
-			files <- filepaths
+			totalFilesChan <- n
 		}
+		close(files)
+		close(filesErr)
+		close(totalFilesChan)
 	}()
 
-	parseErrors := make(chan error)
-	parseResults := make(chan ParseResult)
-
-	var fileCount int
-	select {
-	case filesToProcess := <-files:
-		p := &FileProcessor{
-			parseErrors:  parseErrors,
-			parseResults: parseResults,
-			term:         term,
-			bufSize:      bufSize,
-			workerCount:  workerCount,
-			files:        filesToProcess,
-		}
-		p.Do()
-	case err := <-filesErr:
-		return res, err
+	p := &FileProcessor{
+		parseErrors:  make(chan error),
+		parseResults: make(chan ParseResult),
+		term:         term,
+		bufSize:      bufSize,
+		workerCount:  workerCount,
+		files:        files,
 	}
+	go func() {
+		p.Do()
+	}()
 
 	var errs []string
-	for fileCount > 0 {
+	var filesProcessed int
+	totalFiles := math.MaxInt32
+	for totalFiles > filesProcessed {
 		select {
-		case pr := <-parseResults:
-			fileCount--
+		case tf, ok := <-totalFilesChan:
+			if !ok {
+				totalFilesChan = nil
+				continue
+			}
+			totalFiles = tf
+		case err, ok := <-filesErr:
+			if !ok {
+				filesErr = nil
+			}
+			if err != nil {
+				return res, err
+			}
+		case pr := <-p.parseResults:
+			filesProcessed++
 			res = append(res, pr)
-		case err := <-parseErrors:
-			fileCount--
+		case err := <-p.parseErrors:
+			filesProcessed++
 			errs = append(errs, err.Error())
 		}
 	}
 
 	if len(errs) > 0 {
-		return res, errors.New(strings.Join(errs, "; "))
+		return res, errors.New(strings.Join(errs, "\n"))
 	} else {
 		return res, nil
 	}
@@ -114,36 +124,67 @@ func (p *FileProcessor) Do() {
 		workers <- struct{}{}
 	}
 
-	for p.curFile < len(p.files) {
+	for {
 		select {
 		case <-workers:
-			f := p.files[p.curFile]
-			p.curFile++
+			f := <-p.files
+			if f == "" {
+				continue
+			}
 			go func() {
-				res, err := processFile(f, p.term, p.bufSize)
+				pr, err := processFile(f, p.term, p.bufSize)
 				if err != nil {
 					p.parseErrors <- err
 				} else {
-					p.parseResults <- res
+					p.parseResults <- pr
 				}
+				workers <- struct{}{}
 			}()
-			workers <- struct{}{}
 		}
 	}
+
+	//close(p.parseErrors)
+	//close(p.parseResults)
+	//close(workers)
 }
 
-func collectFiles(dir string) (files []string, err error) {
-	err = filepath.WalkDir(dir, func(path string, dir os.DirEntry, err error) error {
+func (p *FileProcessor) DoNoWorker() {
+	for {
+		select {
+		case f := <-p.files:
+			if f == "" {
+				continue
+			}
+			go func() {
+				pr, err := processFile(f, p.term, p.bufSize)
+				if err != nil {
+					p.parseErrors <- err
+				} else {
+					p.parseResults <- pr
+				}
+			}()
+		}
+	}
+
+	//close(p.parseErrors)
+	//close(p.parseResults)
+	//close(workers)
+}
+
+func sendFiles(dir string, out chan<- string) (int, error) {
+	var n int
+	err := filepath.WalkDir(dir, func(path string, dir os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if dir.IsDir() {
 			return err
 		}
-		files = append(files, path)
+		out <- path
+		n++
 		return nil
 	})
-	return files, err
+	return n, err
 }
 
 func processFile(path string, term string, bufSize int) (ParseResult, error) {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/stretchr/testify/require"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,47 +16,56 @@ type TestLog interface {
 }
 
 func TestSerialParse(t *testing.T) {
-	CreateTestFiles(t, 10)
+	fileCount := 10
+	dir := CreateTestFiles(t, fileCount)
 	term := "create"
-	res, err := SerialParse("testdata", term, 1024)
+	res, err := SerialParse(dir, term, 1024)
 	require.NoError(t, err, "something went wrong")
+	require.NotEmpty(t, res)
+	require.Len(t, res, fileCount)
 	verifyParseResults(t, res, term)
 }
 
 func TestParallelParse(t *testing.T) {
-	CreateTestFiles(t, 10)
 	term := "create"
-	res, err := ParallelParse("testdata", term, 1024, 10)
-	require.NoError(t, err, "something went wrong")
-	verifyParseResults(t, res, term)
-
-	_, err = ParallelParse("doesntexist", term, 1024, 10)
+	_, err := ParallelParse("shoulderrordirnotexist", term, 1024, 10)
 	require.Error(t, err)
+
+	fileCount := 10
+	dir := CreateTestFiles(t, fileCount)
+	res, err := ParallelParse(dir, term, 1024, 10)
+	require.NoError(t, err)
+	require.Len(t, res, fileCount)
+	verifyParseResults(t, res, term)
 }
 
 func benchmarkSerialParse(n int, b *testing.B) {
-	CreateTestFiles(b, n)
+	dir := CreateTestFiles(b, n)
 	for i := 0; i < b.N; i++ {
-		_, err := SerialParse("testdata", "create", 1024)
+		_, err := SerialParse(dir, "create", 1024)
 		require.NoError(b, err)
 	}
 }
 
-func BenchmarkSerialParse10(b *testing.B)   { benchmarkSerialParse(10, b) }
-func BenchmarkSerialParse100(b *testing.B)  { benchmarkSerialParse(100, b) }
-func BenchmarkSerialParse1000(b *testing.B) { benchmarkSerialParse(1000, b) }
+func BenchmarkSerialParse10(b *testing.B) { benchmarkSerialParse(10, b) }
+
+func BenchmarkSerialParse100(b *testing.B) { benchmarkSerialParse(100, b) }
+
+//func BenchmarkSerialParse1000(b *testing.B) { benchmarkSerialParse(1000, b) }
 
 func benchmarkParallelParse(n int, w int, b *testing.B) {
-	CreateTestFiles(b, n)
+	dir := CreateTestFiles(b, n)
 	for i := 0; i < b.N; i++ {
-		_, err := ParallelParse("testdata", "create", 1024, w)
+		_, err := ParallelParse(dir, "create", 1024, w)
 		require.NoError(b, err)
 	}
 }
 
-func BenchmarkParallelParse10(b *testing.B)   { benchmarkParallelParse(10, 100, b) }
-func BenchmarkParallelParse100(b *testing.B)  { benchmarkParallelParse(100, 100, b) }
-func BenchmarkParallelParse1000(b *testing.B) { benchmarkParallelParse(1000, 100, b) }
+func BenchmarkParallelParse10(b *testing.B) { benchmarkParallelParse(10, 10, b) }
+
+func BenchmarkParallelParse100(b *testing.B) { benchmarkParallelParse(100, 10, b) }
+
+//func BenchmarkParallelParse1000(b *testing.B) { benchmarkParallelParse(1000, 100, b) }
 
 func verifyParseResults(t *testing.T, res []ParseResult, term string) {
 	for _, r := range res {
@@ -79,57 +89,56 @@ func verifyParseResults(t *testing.T, res []ParseResult, term string) {
 	}
 }
 
-func CreateTestFiles(t TestLog, n int) {
+// @TODO create unique dir for test set to use it's own files to avoid issues
+
+func CreateTestFiles(t TestLog, n int) string {
+	dest, err := ioutil.TempDir("", "")
+
+	var cleanup func(error)
+	cleanup = func(err error) {
+		if err != nil {
+			CleanupTestFiles(t, dest)
+			t.Fatal(err)
+		}
+	}
+
 	filename := "example.log"
 	source, err := os.Open("testdata/example.log")
-	if err != nil {
-		t.Fatal(err)
-	}
+	cleanup(err)
+
 	defer func() {
-		err = source.Close()
-		if err != nil {
+		if err = source.Close(); err != nil {
 			t.Fatal(err)
 		}
 	}()
+
+	cleanup(err)
 
 	for i := 0; i < n; i++ {
 		// wrap to ensure defer executes asap see:
 		// https://stackoverflow.com/a/45620423
 		func() {
-			name := filepath.Join("testdata", fmt.Sprintf("%d-%s", i, filename))
+			name := filepath.Join(dest, fmt.Sprintf("%d-%s", i, filename))
 			var f *os.File
 			f, err = os.Create(name)
-			if err != nil {
-				t.Fatal(err)
-			}
+			cleanup(err)
 			defer func() {
-				if err = f.Close(); err != nil {
-					t.Fatal(err)
-				}
+				cleanup(f.Close())
 			}()
 
-			if _, err = io.Copy(f, source); err != nil {
-				t.Fatal(err)
-			}
+			_, err = io.Copy(f, source)
+			cleanup(err)
 		}()
 	}
 
 	t.Cleanup(func() {
-		CleanupTestFiles(t)
+		CleanupTestFiles(t, dest)
 	})
+	return dest
 }
 
-func CleanupTestFiles(t TestLog) {
-	if err := filepath.WalkDir("testdata", func(path string, dir os.DirEntry, err error) error {
-		if dir.Name() == "example.log" || dir.IsDir() {
-			return nil
-		} else {
-			if err = os.Remove(path); err != nil {
-				return err
-			}
-			return nil
-		}
-	}); err != nil {
+func CleanupTestFiles(t TestLog, dir string) {
+	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
 	}
 }
